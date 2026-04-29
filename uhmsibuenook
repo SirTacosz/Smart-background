@@ -2,69 +2,83 @@ import cv2
 import numpy as np
 import sys
 
-# --- CARGA SEGURA DE MEDIAPIPE ---
-try:
-    import mediapipe as mp
-    from mediapipe.python.solutions import selfie_segmentation
-    segment = selfie_segmentation.SelfieSegmentation(model_selection=1)
-    print("✅ MediaPipe: Listo")
-except Exception as e:
-    print(f"❌ Error en MediaPipe: {e}")
-    print("Prueba instalando: pip install mediapipe")
-    sys.exit()
+import mediapipe as mp
+from mediapipe.python.solutions import selfie_segmentation
+segment = selfie_segmentation.SelfieSegmentation(model_selection=1)
 
-# --- CARGA SEGURA DE YOLO ---
-try:
-    from ultralytics import YOLO
-    model_yolo = YOLO('yolov8n.pt') 
-    print("✅ YOLOv8: Listo")
-except Exception as e:
-    print(f"❌ Error en YOLO: {e}")
-    sys.exit()
+from ultralytics import YOLO
+model_yolo = YOLO('yolov8n-seg.pt')
 
 # --- INICIO DE CÁMARA ---
 cap = cv2.VideoCapture(0) # Si no abre, cambia el 0 por 1
 
 if not cap.isOpened():
-    print("❌ No se detectó la cámara")
+    print("No se detectó la cámara")
     sys.exit()
 
-print(">>> PROYECTO ITNL CORRIENDO... (Presiona 'q' para salir)")
+print(">>> PROYECTO CORRIENDO... (Presiona 'q' para salir)")
 
 while cap.isOpened():
-    success, frame = cap.read()
+    success, frameIzq = cap.read()
+    frame = cv2.flip(frameIzq, 1)
     if not success:
         break
 
     # 1. Quitar fondo (Croma)
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = segment.process(frame_rgb)
-    mask = results.segmentation_mask > 0.5
+    mask = results.segmentation_mask > 0.1
     
     # Crear fondo verde
     bg_verde = np.zeros(frame.shape, dtype=np.uint8)
-    bg_verde[:] = (0, 255, 0) # Color verde brillante
+    bg_verde[:] = (0, 200, 0) # Color verde brillante
+
+
     
-    # Mezclar persona con fondo verde
-    mask_3d = np.stack((mask,) * 3, axis=-1).astype(np.uint8)
+    results_yolo = model_yolo(frame, conf=0.25, iou=0.45, imgsz=640, verbose=False)
+
+    object_mask = np.zeros(mask.shape, dtype=bool)
+    for r in results_yolo:
+        if hasattr(r, 'masks') and r.masks is not None:
+            for mask_obj, box in zip(r.masks.data, r.boxes):
+                label = model_yolo.names[int(box.cls[0])]
+                if label == 'person':
+                    continue
+                mask_obj = mask_obj.cpu().numpy() if hasattr(mask_obj, 'cpu') else mask_obj
+                mask_obj = mask_obj.astype(bool)
+                if mask_obj.shape != mask.shape:
+                    mask_obj = cv2.resize(mask_obj.astype(np.uint8), (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+                object_mask |= mask_obj
+        else:
+            for box in r.boxes:
+                label = model_yolo.names[int(box.cls[0])]
+                if label == 'person':
+                    continue
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(frame.shape[1], x2)
+                y2 = min(frame.shape[0], y2)
+                object_mask[y1:y2, x1:x2] = True
+
+    combined_mask = np.logical_or(mask, object_mask)
+
+    # Mezclar persona y objetos con fondo verde
+    mask_3d = np.stack((combined_mask,) * 3, axis=-1)
     output = np.where(mask_3d, frame, bg_verde)
 
-    # 2. Detección de objetos con YOLO
-    results_yolo = model_yolo(frame, conf=0.5, verbose=False)
-    
+    # Dibujar cuadros sobre el resultado final
     for r in results_yolo:
         for box in r.boxes:
-            # Dibujar cuadro
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             label = model_yolo.names[int(box.cls[0])]
-            
-            # Cuadro azul y texto
             cv2.rectangle(output, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(output, f"Detectado: {label}", (x1, y1-10), 
+            cv2.putText(output,"Detectado:", (x1, y1-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
+
     # 3. Mostrar ventana
-    cv2.imshow('ASISTENTE IA - PROYECTO ITNL', output)
+    cv2.imshow('ASISTENTE CAMARA - PROYECTO ITNL', output)
 
     # Salir con la tecla 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
