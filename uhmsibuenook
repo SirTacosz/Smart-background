@@ -1,0 +1,74 @@
+import cv2
+import numpy as np
+import sys
+
+# --- CARGA SEGURA DE MEDIAPIPE ---
+try:
+    import mediapipe as mp
+    from mediapipe.python.solutions import selfie_segmentation
+    segment = selfie_segmentation.SelfieSegmentation(model_selection=1)
+    print("✅ MediaPipe: Listo")
+except Exception as e:
+    print(f"❌ Error en MediaPipe: {e}")
+    print("Prueba instalando: pip install mediapipe")
+    sys.exit()
+
+# --- CARGA SEGURA DE YOLO ---
+try:
+    from ultralytics import YOLO
+    model_yolo = YOLO('yolov8n.pt') 
+    print("✅ YOLOv8: Listo")
+except Exception as e:
+    print(f"❌ Error en YOLO: {e}")
+    sys.exit()
+
+# --- INICIO DE CÁMARA ---
+cap = cv2.VideoCapture(0) # Si no abre, cambia el 0 por 1
+
+if not cap.isOpened():
+    print("❌ No se detectó la cámara")
+    sys.exit()
+
+print(">>> PROYECTO ITNL CORRIENDO... (Presiona 'q' para salir)")
+
+while cap.isOpened():
+    success, frame = cap.read()
+    if not success:
+        break
+
+    # 1. Quitar fondo (Croma)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = segment.process(frame_rgb)
+    mask = results.segmentation_mask > 0.5
+    
+    # Crear fondo verde
+    bg_verde = np.zeros(frame.shape, dtype=np.uint8)
+    bg_verde[:] = (0, 255, 0) # Color verde brillante
+    
+    # Mezclar persona con fondo verde
+    mask_3d = np.stack((mask,) * 3, axis=-1).astype(np.uint8)
+    output = np.where(mask_3d, frame, bg_verde)
+
+    # 2. Detección de objetos con YOLO
+    results_yolo = model_yolo(frame, conf=0.5, verbose=False)
+    
+    for r in results_yolo:
+        for box in r.boxes:
+            # Dibujar cuadro
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            label = model_yolo.names[int(box.cls[0])]
+            
+            # Cuadro azul y texto
+            cv2.rectangle(output, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(output, f"Detectado: {label}", (x1, y1-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    # 3. Mostrar ventana
+    cv2.imshow('ASISTENTE IA - PROYECTO ITNL', output)
+
+    # Salir con la tecla 'q'
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
