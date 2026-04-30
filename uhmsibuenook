@@ -7,8 +7,13 @@ import mediapipe as mp
 from mediapipe.python.solutions import selfie_segmentation
 segment = selfie_segmentation.SelfieSegmentation(model_selection=1)
 
+# Agregar detección de manos
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
 from ultralytics import YOLO
-model_yolo = YOLO('yolov8n-seg.pt')  
+model_yolo = None
 
 # Camara y asim
 cap = cv2.VideoCapture(0) # Si no abre, cambia el 0 por 1
@@ -18,12 +23,45 @@ if not cap.isOpened():
 
 print("Instrucciones:")
 print("  F: Seleccionar foto de fondo")
-print("  T: Cambiar fondo (Verde -> Foto -> Borroso -> Verde)")
+print("  T: Cambiar fondo (Verde -> Foto -> Borroso -> Objeto)")
 print("  R: Capturar objeto")
 print("  Q: Salir")
+
+model_choice = 'yolov8n-seg.pt'
+while True:
+    success, frame = cap.read()
+    if not success:
+        break
+    frame = cv2.flip(frame, 1)
+    cv2.putText(frame, 'Selecciona modelo YOLO: 1=nano 2=small 3=medium', (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, 'Presiona 1, 2, 3 o Q para salir', (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    cv2.imshow('Smart Background', frame)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('1'):
+        model_choice = 'yolov8n-seg.pt'
+        cv2.destroyAllWindows()
+        break
+    if key == ord('2'):
+        model_choice = 'yolov8s-seg.pt'
+        cv2.destroyAllWindows()
+        break
+    if key == ord('3'):
+        model_choice = 'yolov8m-seg.pt'
+        cv2.destroyAllWindows()
+        break
+    if key == ord('q'):
+        cap.release()
+        cv2.destroyAllWindows()
+        sys.exit()
+
+model_yolo = YOLO(model_choice)
+print(f'Modelo cargado: {model_choice}')
 object_snapshot = None
 frame_counter = 0
 results_yolo = None
+hand_results = None
 bg_mode = 0  # 0=verde, 1=foto, 2=borroso
 bg_photo = None
 
@@ -42,6 +80,7 @@ while cap.isOpened():
     # Quitar fondo (Croma)
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = segment.process(frame_rgb)
+    hand_results = hands.process(frame_rgb)
     mask = results.segmentation_mask > 0.3
     
     # Crear fondo según el modo
@@ -57,9 +96,18 @@ while cap.isOpened():
             # Si no hay foto seleccionada, usa verde
             bg_actual = np.zeros(frame.shape, dtype=np.uint8)
             bg_actual[:] = (0, 255, 0)
-    else:
+    elif bg_mode == 2:
         #  Borroso 
         bg_actual = cv2.GaussianBlur(frame, (51, 51), 0)
+    else:
+        # Fondo con objeto capturado
+        if object_snapshot is not None:
+            # Expandir la imagen del objeto para que llene la ventana
+            bg_actual = cv2.resize(object_snapshot[:, :, :3], (frame.shape[1], frame.shape[0]))
+        else:
+            # Si no hay objeto capturado, usa verde
+            bg_actual = np.zeros(frame.shape, dtype=np.uint8)
+            bg_actual[:] = (0, 255, 0)
     
     # Detección de objetos con YOLO cada 2 frames
     if frame_counter % 2 == 0:
@@ -77,6 +125,23 @@ while cap.isOpened():
                 mask_binary = (mask_resized > 0.5).astype(np.uint8)
                 combined_mask |= mask_binary.astype(bool)
     
+    # Agregar máscaras de manos
+    if hand_results.multi_hand_landmarks:
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            # Extraer puntos de landmarks
+            points = []
+            for landmark in hand_landmarks.landmark:
+                x = int(landmark.x * frame.shape[1])
+                y = int(landmark.y * frame.shape[0])
+                points.append([x, y])
+            points = np.array(points, dtype=np.int32)
+            # Crear convex hull
+            hull = cv2.convexHull(points)
+            # Crear máscara
+            hand_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+            cv2.fillConvexPoly(hand_mask, hull, 1)
+            combined_mask |= hand_mask.astype(bool)
+    
     # Aplicar máscara combinada
     mask_3d = np.stack((combined_mask,) * 3, axis=-1).astype(np.uint8)
     output = np.where(mask_3d, frame, bg_actual)
@@ -87,21 +152,30 @@ while cap.isOpened():
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             label = model_yolo.names[int(box.cls[0])]
             cv2.rectangle(output, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(output, f"Detectado: {label}", (x1, y1-10), 
+            cv2.putText(output, "Gay Detectado:", (x1, y1-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    
+    # Dibujar bounding boxes de manos
+    if hand_results.multi_hand_landmarks:
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            # Calcular bounding box
+            x_min = min([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
+            y_min = min([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
+            x_max = max([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
+            y_max = max([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
+            cv2.rectangle(output, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+            cv2.putText(output, "Palma Detectada", (x_min, y_min-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     # Mostrar ventana
-    if object_snapshot is not None:
+    if object_snapshot is not None and bg_mode != 3:
         thumb_h = min(180, output.shape[0] // 3)
         thumb_w = int(object_snapshot.shape[1] * thumb_h / object_snapshot.shape[0])
         thumb = cv2.resize(object_snapshot, (thumb_w, thumb_h))
         thumb_bgr = thumb[:, :, :3] if thumb.shape[2] == 4 else thumb
         output[10:10+thumb_h, 10:10+thumb_w] = thumb_bgr
         cv2.rectangle(output, (10, 10), (10+thumb_w, 10+thumb_h), (0, 255, 255), 2)
-        cv2.putText(output, 'Objeto capturado HOLA', (10, 10 + thumb_h + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    cv2.imshow('ASISTENTE IA - PROYECTO ITNL', output)
+    cv2.imshow('Smart background', output)
 
     # Teclas de control
     key = cv2.waitKey(1) & 0xFF
@@ -117,12 +191,12 @@ while cap.isOpened():
         if file_path:
             bg_photo = cv2.imread(file_path)
             if bg_photo is not None:
-                print(f"Foto cargada: {file_path}")
+                print("Foto cargada")
             else:
                 print("Error al cargar la foto")
     if key == ord('t') or key == ord('T'):
-        bg_mode = (bg_mode + 1) % 3
-        modo_nombre = ['Verde', 'Foto', 'Borroso'][bg_mode]
+        bg_mode = (bg_mode + 1) % 4
+        modo_nombre = ['Verde', 'Foto', 'Borroso', 'Objeto'][bg_mode]
         print(f"Fondo cambiado a: {modo_nombre}")
     if key == ord('r') or key == ord('R'):
         captured = None
@@ -150,8 +224,44 @@ while cap.isOpened():
                 break
             if captured is not None:
                 break
+        # Si no se capturó objeto YOLO, intentar capturar palma
+        if captured is None and hand_results.multi_hand_landmarks:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                # Extraer puntos de landmarks
+                points = []
+                for landmark in hand_landmarks.landmark:
+                    x = int(landmark.x * frame.shape[1])
+                    y = int(landmark.y * frame.shape[0])
+                    points.append([x, y])
+                points = np.array(points, dtype=np.int32)
+                # Crear convex hull
+                hull = cv2.convexHull(points)
+                # Crear máscara
+                hand_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+                cv2.fillConvexPoly(hand_mask, hull, 1)
+                # Encontrar bounding box
+                x_min = min(points[:, 0])
+                y_min = min(points[:, 1])
+                x_max = max(points[:, 0])
+                y_max = max(points[:, 1])
+                # Cortar la región
+                x1, y1, x2, y2 = x_min, y_min, x_max, y_max
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                mask_crop = hand_mask[y1:y2, x1:x2]
+                cropped = frame[y1:y2, x1:x2]
+                if mask_crop.sum() == 0:
+                    continue
+                cropped_rgba = cv2.cvtColor(cropped, cv2.COLOR_BGR2BGRA)
+                alpha_channel = mask_crop * 255
+                cropped_rgba[:, :, 3] = alpha_channel
+                captured = cropped_rgba
+                break
         if captured is not None:
             object_snapshot = captured
 
 cap.release()
 cv2.destroyAllWindows()
+hands.close()
