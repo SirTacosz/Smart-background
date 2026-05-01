@@ -25,6 +25,7 @@ print("Instrucciones:")
 print("  F: Seleccionar foto de fondo")
 print("  T: Cambiar fondo (Verde -> Foto -> Borroso -> Objeto)")
 print("  R: Capturar objeto")
+print("  W: Mostrar/Ocultar cuadros")
 print("  Q: Salir")
 
 model_choice = 'yolov8n-seg.pt'
@@ -33,10 +34,10 @@ while True:
     if not success:
         break
     frame = cv2.flip(frame, 1)
-    cv2.putText(frame, 'Selecciona modelo YOLO: 1=nano 2=small 3=medium', (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, 'Selecciona modelo 1= Rapido 2= Eficiente 3= Avanzado', (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     cv2.putText(frame, 'Presiona 1, 2, 3 o Q para salir', (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 1)
     cv2.imshow('Smart Background', frame)
     key = cv2.waitKey(1) & 0xFF
     if key == ord('1'):
@@ -62,8 +63,9 @@ object_snapshot = None
 frame_counter = 0
 results_yolo = None
 hand_results = None
-bg_mode = 0  # 0=verde, 1=foto, 2=borroso
+bg_mode = 0  
 bg_photo = None
+show_boxes = True 
 
 # Fondo type shit
 while cap.isOpened():
@@ -81,7 +83,7 @@ while cap.isOpened():
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = segment.process(frame_rgb)
     hand_results = hands.process(frame_rgb)
-    mask = results.segmentation_mask > 0.3
+    mask = results.segmentation_mask > 0.5
     
     # Crear fondo según el modo
     if bg_mode == 0:
@@ -98,7 +100,7 @@ while cap.isOpened():
             bg_actual[:] = (0, 255, 0)
     elif bg_mode == 2:
         #  Borroso 
-        bg_actual = cv2.GaussianBlur(frame, (51, 51), 0)
+        bg_actual = cv2.GaussianBlur(frame, (75, 75), 0)
     else:
         # Fondo con objeto capturado
         if object_snapshot is not None:
@@ -122,7 +124,7 @@ while cap.isOpened():
             for mask_obj in r.masks.data.cpu().numpy():
                 # Redimensionar máscara al tamaño del frame
                 mask_resized = cv2.resize(mask_obj, (frame.shape[1], frame.shape[0]))
-                mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                mask_binary = (mask_resized > 0.60).astype(np.uint8)
                 combined_mask |= mask_binary.astype(bool)
     
     # Agregar máscaras de manos
@@ -147,24 +149,22 @@ while cap.isOpened():
     output = np.where(mask_3d, frame, bg_actual)
     
     # Dibujar etiquetas de objetos
-    for r in results_yolo:
-        for box in r.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            label = model_yolo.names[int(box.cls[0])]
-            cv2.rectangle(output, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(output, "Gay Detectado:", (x1, y1-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-    
-    # Dibujar bounding boxes de manos
-    if hand_results.multi_hand_landmarks:
-        for hand_landmarks in hand_results.multi_hand_landmarks:
-            # Calcular bounding box
-            x_min = min([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
-            y_min = min([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
-            x_max = max([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
-            y_max = max([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
-            cv2.rectangle(output, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-            cv2.putText(output, "Palma Detectada", (x_min, y_min-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    if show_boxes:
+        for r in results_yolo:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                label = model_yolo.names[int(box.cls[0])]
+                cv2.rectangle(output, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        
+        # Dibujar bounding boxes de manos
+        if hand_results.multi_hand_landmarks:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                # Calcular bounding box
+                x_min = min([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
+                y_min = min([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
+                x_max = max([int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark])
+                y_max = max([int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark])
+                cv2.rectangle(output, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
 
     # Mostrar ventana
     if object_snapshot is not None and bg_mode != 3:
@@ -181,6 +181,10 @@ while cap.isOpened():
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
+    if key == ord('w') or key == ord('W'):
+        show_boxes = not show_boxes
+        estado = 'Visibles' if show_boxes else 'Ocultos'
+        print(f"Cuadros {estado}")
     if key == ord('f') or key == ord('F'):
         root = Tk()
         root.withdraw()
@@ -261,6 +265,8 @@ while cap.isOpened():
                 break
         if captured is not None:
             object_snapshot = captured
+        else:
+            object_snapshot = None
 
 cap.release()
 cv2.destroyAllWindows()
